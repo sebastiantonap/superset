@@ -390,17 +390,94 @@ def test_get_oauth2_redirect_uri_from_config(mocker: MockerFixture) -> None:
     assert get_oauth2_redirect_uri() == custom_uri
 
 
-def test_get_oauth2_redirect_uri_falls_back_to_url_for(mocker: MockerFixture) -> None:
+def test_get_oauth2_redirect_uri_uses_server_name(mocker: MockerFixture) -> None:
     """
-    Test that get_oauth2_redirect_uri falls back to url_for when config is not set.
+    Test that get_oauth2_redirect_uri builds the URI from SERVER_NAME +
+    PREFERRED_URL_SCHEME when ``DATABASE_OAUTH2_REDIRECT_URI`` is not set.
     """
-    fallback_uri = "http://localhost:8088/api/v1/database/oauth2/"
+    mocker.patch(
+        "flask.current_app.config",
+        {
+            "SERVER_NAME": "superset.example.com",
+            "PREFERRED_URL_SCHEME": "https",
+            "WEBDRIVER_BASEURL": "http://attacker.example.com/",
+        },
+    )
+    mocker.patch(
+        "superset.utils.oauth2.url_for",
+        return_value="/api/v1/database/oauth2/",
+    )
+    assert (
+        get_oauth2_redirect_uri()
+        == "https://superset.example.com/api/v1/database/oauth2/"
+    )
+
+
+def test_get_oauth2_redirect_uri_falls_back_to_webdriver_baseurl(
+    mocker: MockerFixture,
+) -> None:
+    """
+    Test that get_oauth2_redirect_uri falls back to ``WEBDRIVER_BASEURL`` when
+    neither ``DATABASE_OAUTH2_REDIRECT_URI`` nor ``SERVER_NAME`` is set.
+    """
+    mocker.patch(
+        "flask.current_app.config",
+        {"WEBDRIVER_BASEURL": "https://superset.example.com/"},
+    )
+    mocker.patch(
+        "superset.utils.oauth2.url_for",
+        return_value="/api/v1/database/oauth2/",
+    )
+    assert (
+        get_oauth2_redirect_uri()
+        == "https://superset.example.com/api/v1/database/oauth2/"
+    )
+
+
+def test_get_oauth2_redirect_uri_ignores_request_host(
+    mocker: MockerFixture,
+) -> None:
+    """
+    Verify that the redirect URI does not depend on the request's ``Host``
+    header. ``url_for`` is called without ``_external=True`` so the host
+    portion of the URI is taken exclusively from configuration.
+    """
+    mocker.patch(
+        "flask.current_app.config",
+        {"WEBDRIVER_BASEURL": "https://superset.example.com/"},
+    )
+    url_for_mock = mocker.patch(
+        "superset.utils.oauth2.url_for",
+        return_value="/api/v1/database/oauth2/",
+    )
+
+    result = get_oauth2_redirect_uri()
+
+    # The user-controlled Host header must not appear in the URI.
+    assert result.startswith("https://superset.example.com/")
+    # url_for must be called with the relative form so Flask never reads the
+    # Host header to build the absolute URL.
+    url_for_mock.assert_called_once_with("DatabaseRestApi.oauth2")
+    _, kwargs = url_for_mock.call_args
+    assert "_external" not in kwargs
+
+
+def test_get_oauth2_redirect_uri_raises_when_no_base_configured(
+    mocker: MockerFixture,
+) -> None:
+    """
+    Test that get_oauth2_redirect_uri raises OAuth2Error when no trusted base
+    URL is configured.
+    """
+    from superset.exceptions import OAuth2Error
+
     mocker.patch("flask.current_app.config", {})
     mocker.patch(
         "superset.utils.oauth2.url_for",
-        return_value=fallback_uri,
+        return_value="/api/v1/database/oauth2/",
     )
-    assert get_oauth2_redirect_uri() == fallback_uri
+    with pytest.raises(OAuth2Error):
+        get_oauth2_redirect_uri()
 
 
 def test_get_oauth2_redirect_uri_raises_on_build_error(
