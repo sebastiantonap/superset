@@ -198,7 +198,7 @@ def test_df_to_sql_if_exists_replace(mock_upload_to_s3, mock_g):
             {"if_exists": "replace", "header": 1, "na_values": "mock", "sep": "mock"},
         )
 
-    mock_execute.assert_any_call(f"DROP TABLE IF EXISTS {table_name}")
+    mock_execute.assert_any_call(f"DROP TABLE IF EXISTS `{table_name}`")
     app.config = config
 
 
@@ -226,7 +226,7 @@ def test_df_to_sql_if_exists_replace_with_schema(mock_upload_to_s3, mock_g):
             {"if_exists": "replace", "header": 1, "na_values": "mock", "sep": "mock"},
         )
 
-    mock_execute.assert_any_call(f"DROP TABLE IF EXISTS {schema}.{table_name}")
+    mock_execute.assert_any_call(f"DROP TABLE IF EXISTS `{schema}`.`{table_name}`")
     app.config = config
 
 
