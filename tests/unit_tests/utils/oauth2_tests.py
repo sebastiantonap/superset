@@ -400,29 +400,10 @@ def test_get_oauth2_redirect_uri_uses_server_name(mocker: MockerFixture) -> None
         {
             "SERVER_NAME": "superset.example.com",
             "PREFERRED_URL_SCHEME": "https",
+            # WEBDRIVER_BASEURL is intentionally set to an attacker-style host
+            # to assert the function does NOT fall back to it.
             "WEBDRIVER_BASEURL": "http://attacker.example.com/",
         },
-    )
-    mocker.patch(
-        "superset.utils.oauth2.url_for",
-        return_value="/api/v1/database/oauth2/",
-    )
-    assert (
-        get_oauth2_redirect_uri()
-        == "https://superset.example.com/api/v1/database/oauth2/"
-    )
-
-
-def test_get_oauth2_redirect_uri_falls_back_to_webdriver_baseurl(
-    mocker: MockerFixture,
-) -> None:
-    """
-    Test that get_oauth2_redirect_uri falls back to ``WEBDRIVER_BASEURL`` when
-    neither ``DATABASE_OAUTH2_REDIRECT_URI`` nor ``SERVER_NAME`` is set.
-    """
-    mocker.patch(
-        "flask.current_app.config",
-        {"WEBDRIVER_BASEURL": "https://superset.example.com/"},
     )
     mocker.patch(
         "superset.utils.oauth2.url_for",
@@ -444,7 +425,10 @@ def test_get_oauth2_redirect_uri_ignores_request_host(
     """
     mocker.patch(
         "flask.current_app.config",
-        {"WEBDRIVER_BASEURL": "https://superset.example.com/"},
+        {
+            "SERVER_NAME": "superset.example.com",
+            "PREFERRED_URL_SCHEME": "https",
+        },
     )
     url_for_mock = mocker.patch(
         "superset.utils.oauth2.url_for",
@@ -467,11 +451,17 @@ def test_get_oauth2_redirect_uri_raises_when_no_base_configured(
 ) -> None:
     """
     Test that get_oauth2_redirect_uri raises OAuth2Error when no trusted base
-    URL is configured.
+    URL is configured. The default ``WEBDRIVER_BASEURL`` (which has a
+    non-empty default in ``superset/config.py``) must NOT be used to derive
+    the redirect URI.
     """
     from superset.exceptions import OAuth2Error
 
-    mocker.patch("flask.current_app.config", {})
+    mocker.patch(
+        "flask.current_app.config",
+        # Realistic default config: WEBDRIVER_BASEURL is set to its default.
+        {"WEBDRIVER_BASEURL": "http://0.0.0.0:8080/"},
+    )
     mocker.patch(
         "superset.utils.oauth2.url_for",
         return_value="/api/v1/database/oauth2/",

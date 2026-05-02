@@ -38,14 +38,14 @@ order of preference:
 1. `DATABASE_OAUTH2_REDIRECT_URI` — explicit configured URI (unchanged).
 2. `SERVER_NAME` + `PREFERRED_URL_SCHEME` — Flask's standard absolute-URL
    configuration.
-3. `WEBDRIVER_BASEURL` — Superset's configured base URL used elsewhere for
-   building absolute links (e.g. report emails).
 
-If none of the above is configured, `get_oauth2_redirect_uri()` raises an
-`OAuth2Error`. Most deployments already set `WEBDRIVER_BASEURL`, so no action
-is required. Deployments that relied on `Host`-header-derived redirect URIs
-should set `DATABASE_OAUTH2_REDIRECT_URI`, `SERVER_NAME`, or
-`WEBDRIVER_BASEURL` to the public URL of the Superset instance.
+If neither is configured, `get_oauth2_redirect_uri()` raises an `OAuth2Error`
+with a message instructing operators to set `DATABASE_OAUTH2_REDIRECT_URI`.
+Deployments that relied on `Host`-header-derived redirect URIs (including
+local-dev installs that ran on the default config) must now set
+`DATABASE_OAUTH2_REDIRECT_URI` (or `SERVER_NAME` + `PREFERRED_URL_SCHEME`)
+to the public URL of the Superset instance — the same value already
+registered with the upstream OAuth2 provider.
 
 ### Granular Export Controls
 
