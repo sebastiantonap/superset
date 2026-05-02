@@ -21,6 +21,45 @@ import pytest
 from tests.integration_tests.test_app import app
 
 
+@mock.patch("superset.tasks.cache.fetch_csrf_token")
+@mock.patch("superset.tasks.cache.request.Request")
+@mock.patch("superset.tasks.cache.request.urlopen")
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        # Cloud-metadata endpoint — canonical SSRF target.
+        "http://169.254.169.254/",
+        # Loopback / private ranges.
+        "http://127.0.0.1:8080/",
+        "http://10.0.0.1:8080/",
+        # Disallowed schemes.
+        "file:///tmp/superset",
+    ],
+)
+def test_fetch_url_blocks_ssrf_targets(
+    mock_urlopen,
+    mock_request_cls,
+    mock_fetch_csrf_token,
+    base_url,
+):
+    """``fetch_url`` must refuse to issue requests to non-public addresses or
+    disallowed schemes, even when ``WEBDRIVER_BASEURL`` is misconfigured to
+    point at one. Returning early with an error keeps the cache-warmup task
+    from being abused as an SSRF primitive (CWE-918)."""
+    from superset.tasks.cache import fetch_url
+
+    app.config["WEBDRIVER_BASEURL"] = base_url
+    app.config["WEBDRIVER_BASEURL_ALLOWED_HOSTS"] = None
+
+    result = fetch_url("payload", {"key": "value"})
+
+    assert "error" in result
+    assert "exception" in result
+    mock_urlopen.assert_not_called()
+    mock_request_cls.assert_not_called()
+    mock_fetch_csrf_token.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "base_url, expected_referer",
     [
@@ -36,6 +75,10 @@ from tests.integration_tests.test_app import app
         "With trailing slash (HTTPS)",
     ],
 )
+@mock.patch(
+    "superset.utils.urls.socket.getaddrinfo",
+    return_value=[(2, 1, 6, "", ("93.184.216.34", 0))],
+)
 @mock.patch("superset.tasks.cache.fetch_csrf_token")
 @mock.patch("superset.tasks.cache.request.Request")
 @mock.patch("superset.tasks.cache.request.urlopen")
@@ -45,6 +88,7 @@ def test_fetch_url(
     mock_urlopen,
     mock_request_cls,
     mock_fetch_csrf_token,
+    mock_getaddrinfo,
     base_url,
     expected_referer,
 ):

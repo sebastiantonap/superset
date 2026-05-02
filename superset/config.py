@@ -2041,6 +2041,14 @@ WEBDRIVER_OPTION_ARGS = ["--headless"]
 WEBDRIVER_BASEURL = "http://0.0.0.0:8080/"
 # The base URL for the email report hyperlinks.
 WEBDRIVER_BASEURL_USER_FRIENDLY = WEBDRIVER_BASEURL
+
+# Hostname allow-list applied to server-side outbound HTTP requests issued by
+# Celery tasks (e.g. cache warmup, CSRF-token fetch). When ``None`` (the
+# default) the SSRF validator only blocks non-public IP ranges; when set to a
+# non-empty iterable of hostnames, only those hostnames are permitted as
+# targets — providing defence in depth against SSRF attacks if WEBDRIVER_BASEURL
+# is ever influenced by untrusted input.
+WEBDRIVER_BASEURL_ALLOWED_HOSTS: set[str] | None = None
 # Time selenium will wait for the page to load and render for the email report.
 EMAIL_PAGE_RENDER_WAIT = int(timedelta(seconds=30).total_seconds())
 
