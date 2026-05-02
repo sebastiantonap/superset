@@ -95,6 +95,29 @@ def test_post(
     db.session.commit()
 
 
+def test_post_ignores_host_header(
+    tab_state_data: dict[str, Any], permalink_salt: str, test_client, login_as
+):
+    """The returned permalink URL must be derived from WEBDRIVER_BASEURL,
+    not the attacker-controlled Host header (issue #47)."""
+    from flask import current_app
+
+    login_as(GAMMA_SQLLAB_USERNAME)
+    base_url = current_app.config["WEBDRIVER_BASEURL"]
+    resp = test_client.post(
+        "api/v1/sqllab/permalink",
+        json=tab_state_data,
+        headers={"Host": "evil.example.com"},
+    )
+    assert resp.status_code == 201
+    url = resp.json["url"]
+    assert url.startswith(base_url)
+    assert "evil.example.com" not in url
+    id_ = decode_permalink_id(resp.json["key"], permalink_salt)
+    db.session.query(KeyValueEntry).filter_by(id=id_).delete()
+    db.session.commit()
+
+
 def test_post_access_denied(tab_state_data: dict[str, Any], test_client, login_as):
     resp = test_client.post("api/v1/sqllab/permalink", json=tab_state_data)
     assert resp.status_code == 401

@@ -86,6 +86,28 @@ def test_post(
     db.session.commit()
 
 
+def test_post_ignores_host_header(
+    dashboard_id: int, permalink_salt: str, test_client, login_as_admin
+) -> None:
+    """The returned permalink URL must be derived from WEBDRIVER_BASEURL,
+    not the attacker-controlled Host header (issue #47)."""
+    from flask import current_app
+
+    base_url = current_app.config["WEBDRIVER_BASEURL"]
+    resp = test_client.post(
+        f"api/v1/dashboard/{dashboard_id}/permalink",
+        json=STATE,
+        headers={"Host": "evil.example.com"},
+    )
+    assert resp.status_code == 201
+    url = resp.json["url"]
+    assert url.startswith(base_url)
+    assert "evil.example.com" not in url
+    id_ = decode_permalink_id(resp.json["key"], permalink_salt)
+    db.session.query(KeyValueEntry).filter_by(id=id_).delete()
+    db.session.commit()
+
+
 def test_post_access_denied(test_client, login_as, dashboard_id: int):
     login_as("gamma")
     resp = test_client.post(f"api/v1/dashboard/{dashboard_id}/permalink", json=STATE)

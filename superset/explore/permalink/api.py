@@ -16,7 +16,7 @@
 # under the License.
 import logging
 
-from flask import request, Response, url_for
+from flask import request, Response
 from flask_appbuilder.api import expose, protect, safe
 from marshmallow import ValidationError
 
@@ -35,6 +35,7 @@ from superset.explore.permalink.exceptions import ExplorePermalinkInvalidStateEr
 from superset.explore.permalink.schemas import ExplorePermalinkStateSchema
 from superset.extensions import event_logger
 from superset.key_value.exceptions import KeyValueAccessDeniedError
+from superset.utils.urls import get_url_path
 from superset.views.base_api import BaseSupersetApi, requires_json, statsd_metrics
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,7 @@ class ExplorePermalinkRestApi(BaseSupersetApi):
         try:
             state = self.add_model_schema.load(request.json)
             key = CreateExplorePermalinkCommand(state=state).run()
-            url = url_for("ExplorePermalinkView.permalink", key=key, _external=True)
+            url = get_url_path("ExplorePermalinkView.permalink", key=key)
             return self.response(201, key=key, url=url)
         except ValidationError as ex:
             return self.response(400, message=ex.messages)
