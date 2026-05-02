@@ -28,10 +28,13 @@ logger = logging.getLogger(__name__)
 
 HashAlgorithm = Literal["md5", "sha256"]
 
-# Hash function lookup table for efficient dispatch
+# Hash function lookup table for efficient dispatch.
+# MD5 is used here strictly for non-security purposes (e.g. cache keys and
+# deterministic identifiers), so usedforsecurity=False is set to make the
+# intent explicit and to satisfy Bandit B324 / FIPS-mode environments.
 _HASH_FUNCTIONS: dict[str, Callable[[bytes], str]] = {
     "sha256": lambda data: hashlib.sha256(data).hexdigest(),
-    "md5": lambda data: hashlib.md5(data).hexdigest(),  # noqa: S324
+    "md5": lambda data: hashlib.md5(data, usedforsecurity=False).hexdigest(),
 }
 
 

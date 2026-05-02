@@ -181,3 +181,20 @@ def test_md5_vs_sha256_different_outputs():
     assert len(md5_result) == 32
     # SHA-256 produces 64 character hex string
     assert len(sha256_result) == 64
+
+
+def test_md5_usedforsecurity_false_preserves_digest():
+    """MD5 must remain backward-compatible after usedforsecurity=False is set.
+
+    Regression test for issue #40 (Bandit B324). The fix flags the MD5 hash as
+    non-security usage; this must not change the resulting digest, otherwise
+    cache keys and other deterministic identifiers would be invalidated.
+    """
+    with patch("superset.utils.hashing.get_hash_algorithm", return_value="md5"):
+        # Known MD5 digests, computed independently.
+        assert hash_from_str("test") == "098f6bcd4621d373cade4e832627b4f6"
+        assert hash_from_str("") == "d41d8cd98f00b204e9800998ecf8427e"
+        assert (
+            hash_from_str("The quick brown fox jumps over the lazy dog")
+            == "9e107d9d372bb6826bd81d3542a419d6"
+        )
