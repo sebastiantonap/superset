@@ -96,7 +96,10 @@ def estimate_response_tokens(response: ToolResponse) -> int:
 
         return estimate_token_count(response_str)
     except Exception as e:  # noqa: BLE001
-        logger.warning("Failed to estimate response tokens: %s", e)
+        # Log only the exception class name to avoid leaking response
+        # content (e.g. credentials or tokens) that the exception message
+        # may include. See CWE-532.
+        logger.warning("Failed to estimate response tokens: %s", type(e).__name__)
         # Return a high estimate to be safe (conservative fallback)
         return 100000
 
@@ -127,7 +130,10 @@ def get_response_size_bytes(response: ToolResponse) -> int:
 
         return len(response_str.encode("utf-8"))
     except Exception as e:  # noqa: BLE001
-        logger.warning("Failed to get response size: %s", e)
+        # Log only the exception class name to avoid leaking response
+        # content (e.g. credentials or tokens) that the exception message
+        # may include. See CWE-532.
+        logger.warning("Failed to get response size: %s", type(e).__name__)
         # Return a conservative large value to avoid allowing oversized responses
         # to bypass size checks (returning 0 would underestimate)
         return 1_000_000  # 1MB fallback
@@ -322,7 +328,9 @@ def _identify_large_fields(response: ToolResponse) -> List[str]:
                 ]
 
     except Exception as e:  # noqa: BLE001
-        logger.debug("Failed to identify large fields: %s", e)
+        # Log only the exception class name to avoid leaking response
+        # content that the exception message may include. See CWE-532.
+        logger.debug("Failed to identify large fields: %s", type(e).__name__)
 
     return large_fields
 

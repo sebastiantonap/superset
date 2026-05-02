@@ -19,7 +19,9 @@
 Unit tests for MCP service token utilities.
 """
 
+import logging
 from typing import Any, List
+from unittest.mock import patch
 
 from pydantic import BaseModel
 
@@ -110,6 +112,29 @@ class TestEstimateResponseTokens:
         result = estimate_response_tokens(response)
         assert result > 1000  # Large response should have many tokens
 
+    def test_failure_does_not_log_exception_args(self, caplog: Any) -> None:
+        """Should not log exception args (which may include sensitive data)
+        when JSON serialization fails. Regression test for CWE-532.
+        """
+        secret = "Bearer sk-super-secret-token-1234567890"  # noqa: S105
+
+        with patch(
+            "superset.utils.json.dumps",
+            side_effect=ValueError(f"boom containing {secret}"),
+        ):
+            with caplog.at_level(logging.WARNING):
+                result = estimate_response_tokens({"token": secret})
+
+        # Conservative fallback returned
+        assert result == 100000
+        # Logger emitted a warning but never recorded the secret
+        assert any(
+            "Failed to estimate response tokens" in record.message
+            for record in caplog.records
+        )
+        for record in caplog.records:
+            assert secret not in record.getMessage()
+
 
 class TestGetResponseSizeBytes:
     """Test get_response_size_bytes function."""
@@ -131,6 +156,28 @@ class TestGetResponseSizeBytes:
         response = b"Hello world"
         result = get_response_size_bytes(response)
         assert result == len(response)
+
+    def test_failure_does_not_log_exception_args(self, caplog: Any) -> None:
+        """Should not log exception args (which may include sensitive data)
+        when JSON serialization fails. Regression test for CWE-532.
+        """
+        secret = "password=hunter2-very-secret"  # noqa: S105
+
+        with patch(
+            "superset.utils.json.dumps",
+            side_effect=ValueError(f"boom containing {secret}"),
+        ):
+            with caplog.at_level(logging.WARNING):
+                result = get_response_size_bytes({"creds": secret})
+
+        # Conservative fallback returned
+        assert result == 1_000_000
+        # Logger emitted a warning but never recorded the secret
+        assert any(
+            "Failed to get response size" in record.message for record in caplog.records
+        )
+        for record in caplog.records:
+            assert secret not in record.getMessage()
 
 
 class TestExtractQueryParams:
