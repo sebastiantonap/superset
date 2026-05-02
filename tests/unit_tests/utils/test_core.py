@@ -48,6 +48,7 @@ from superset.utils.core import (
     QueryObjectFilterClause,
     QuerySource,
     remove_extra_adhoc_filters,
+    ReservedUrlParameters,
     sanitize_svg_content,
     sanitize_url,
 )
@@ -165,6 +166,52 @@ def test_is_test():
 )
 def test_parse_boolean_string(test_input: Optional[str], expected: bool):
     assert parse_boolean_string(test_input) == expected
+
+
+@pytest.mark.parametrize(
+    "query_string,expected",
+    [
+        # Param absent -> falsy.
+        ("", False),
+        # Explicit falsy strings.
+        ("standalone=false", False),
+        ("standalone=0", False),
+        ("standalone=", False),
+        # Truthy strings.
+        ("standalone=true", True),
+        ("standalone=1", True),
+        ("standalone=2", True),
+        ("standalone=yes", True),
+        # NaN-injection inputs must not produce undefined behaviour. They
+        # should either be coerced to a regular boolean or rejected; the
+        # output must never be a float / NaN that breaks downstream
+        # comparisons.
+        ("standalone=nan", True),
+        ("standalone=NaN", True),
+        ("standalone=NAN", True),
+        ("standalone=inf", True),
+        ("standalone=-inf", True),
+    ],
+)
+def test_is_standalone_mode_returns_bool(
+    app_context: None, query_string: str, expected: bool
+) -> None:
+    """``is_standalone_mode`` must always return a regular ``bool``/``None``.
+
+    Regression test for the Semgrep ``nan-injection`` finding (issue #59):
+    user input from the ``standalone`` query parameter used to be passed
+    through ``bool()`` indirectly, which is the pattern flagged by the
+    rule. The function must return a plain boolean for any input,
+    including ``"nan"`` / ``"inf"`` / etc.
+    """
+    from flask import current_app
+
+    with current_app.test_request_context(f"/?{query_string}"):
+        result = ReservedUrlParameters.is_standalone_mode()
+
+    # The result must be a plain bool (or None), never a float / NaN.
+    assert isinstance(result, bool)
+    assert result == expected
 
 
 def test_int_values():
