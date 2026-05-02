@@ -24,6 +24,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.schema import CreateSchema
 
 from superset import db
@@ -53,6 +54,13 @@ def _ensure_schema_exists(engine: Engine, schema: str) -> None:
     rather than interpolated into a raw SQL string. Together these guard
     against SQL injection (CWE-89) when the schema name originates from a
     dataset configuration file or other potentially untrusted source.
+
+    SQLAlchemy 1.4's :class:`CreateSchema` does not yet support an
+    ``if_not_exists`` flag (added in SQLAlchemy 2.0), so the idempotent
+    semantics of the original raw ``CREATE SCHEMA IF NOT EXISTS`` statement
+    are preserved by catching the duplicate-schema error that the database
+    raises when another process wins a TOCTOU race against the inspector
+    pre-check.
     """
     if not isinstance(schema, str) or not _VALID_SCHEMA_NAME.match(schema):
         raise ValueError(
@@ -60,12 +68,20 @@ def _ensure_schema_exists(engine: Engine, schema: str) -> None:
             "[A-Za-z_][A-Za-z0-9_]* to be safely used in DDL."
         )
 
-    inspector = inspect(engine)
-    if schema in inspector.get_schema_names():
+    if schema in inspect(engine).get_schema_names():
         return
 
-    with engine.begin() as conn:
-        conn.execute(CreateSchema(schema))
+    try:
+        with engine.begin() as conn:
+            conn.execute(CreateSchema(schema))
+    except DBAPIError:
+        # Another process created the schema between the inspector check
+        # and the CREATE SCHEMA execution. Re-verify via a fresh inspector;
+        # if the schema is now present the DDL effectively succeeded and we
+        # can swallow the duplicate-schema error. Otherwise re-raise so the
+        # caller still sees genuine database failures.
+        if schema not in inspect(engine).get_schema_names():
+            raise
 
 
 def serialize_numpy_arrays(obj: Any) -> Any:  # noqa: C901
@@ -217,6 +233,7 @@ def load_parquet_table(  # noqa: C901
         tbl.fetch_metadata()
 
     db.session.merge(tbl)
+    # pylint: disable=consider-using-transaction
     db.session.commit()
 
     return tbl
@@ -272,6 +289,7 @@ def create_generic_loader(
         if description and tbl:
             tbl.description = description
             db.session.merge(tbl)
+            # pylint: disable=consider-using-transaction
             db.session.commit()
 
     # Set function name and docstring

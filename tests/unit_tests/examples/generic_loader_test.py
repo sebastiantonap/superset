@@ -321,6 +321,70 @@ def test_ensure_schema_exists_uses_create_schema_ddl():
     assert executed.element == "analytics_new"
 
 
+def test_ensure_schema_exists_swallows_concurrent_create_race():
+    """If another process created the schema in the meantime, swallow the error.
+
+    Replicates a TOCTOU race: the inspector reports the schema as missing,
+    so we attempt CREATE SCHEMA, the database raises a duplicate-schema
+    error (because another process won the race), and a fresh inspector
+    confirms the schema now exists. The helper must treat this as success
+    and not propagate the error — preserving the IF NOT EXISTS semantics
+    of the original raw DDL.
+    """
+    from sqlalchemy.exc import ProgrammingError
+
+    from superset.examples.generic_loader import _ensure_schema_exists
+
+    engine = MagicMock()
+    conn = MagicMock()
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+    conn.execute.side_effect = ProgrammingError(
+        "CREATE SCHEMA analytics", {}, Exception('schema "analytics" already exists')
+    )
+
+    inspector_before = MagicMock()
+    inspector_before.get_schema_names.return_value = ["public"]
+    inspector_after = MagicMock()
+    inspector_after.get_schema_names.return_value = ["public", "analytics"]
+
+    with patch(
+        "superset.examples.generic_loader.inspect",
+        side_effect=[inspector_before, inspector_after],
+    ):
+        _ensure_schema_exists(engine, "analytics")  # must NOT raise
+
+    conn.execute.assert_called_once()
+
+
+def test_ensure_schema_exists_reraises_real_db_errors():
+    """Genuine database errors (not duplicate-schema races) must propagate."""
+    from sqlalchemy.exc import ProgrammingError
+
+    from superset.examples.generic_loader import _ensure_schema_exists
+
+    engine = MagicMock()
+    conn = MagicMock()
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+    conn.execute.side_effect = ProgrammingError(
+        "CREATE SCHEMA analytics", {}, Exception("permission denied for database")
+    )
+
+    inspector_before = MagicMock()
+    inspector_before.get_schema_names.return_value = ["public"]
+    # Even after the error the schema is still absent -> not a race.
+    inspector_after = MagicMock()
+    inspector_after.get_schema_names.return_value = ["public"]
+
+    with patch(
+        "superset.examples.generic_loader.inspect",
+        side_effect=[inspector_before, inspector_after],
+    ):
+        with pytest.raises(ProgrammingError):
+            _ensure_schema_exists(engine, "analytics")
+
+
 def test_ensure_schema_exists_create_schema_quotes_malicious_identifier_safely():
     """SQLAlchemy's CreateSchema must double-quote embedded quote characters.
 
@@ -334,10 +398,16 @@ def test_ensure_schema_exists_create_schema_quotes_malicious_identifier_safely()
 
     payload = 'evil"; DROP TABLE users; --'
     compiled = str(CreateSchema(payload).compile(dialect=postgresql.dialect()))
-    # Embedded double-quote is doubled -> identifier remains a single token.
+    # Embedded double-quote is doubled, so the entire payload stays inside a
+    # single quoted identifier instead of breaking out into a new statement.
     assert compiled == 'CREATE SCHEMA "evil""; DROP TABLE users; --"'
-    # The unquoted DROP TABLE statement must not appear at the SQL top level.
-    assert "; DROP TABLE users" not in compiled.replace('""', "")
+    # Balanced quoting is what guarantees the closing quote isn't escaped
+    # away — an odd number would mean the identifier "leaks" into raw SQL.
+    assert compiled.count('"') % 2 == 0
+    # The compiled DDL must be a single ``CREATE SCHEMA "..."`` statement;
+    # any ``;`` characters in the payload remain inside the quoted identifier.
+    assert compiled.startswith('CREATE SCHEMA "')
+    assert compiled.endswith('"')
 
 
 @patch("superset.examples.generic_loader.get_example_database")
