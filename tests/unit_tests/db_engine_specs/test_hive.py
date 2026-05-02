@@ -245,3 +245,33 @@ def test_df_to_sql_rejects_sql_injection_in_column_name(mock_g) -> None:
             df,
             {"if_exists": "fail"},
         )
+
+
+@mock.patch("superset.db_engine_specs.hive.g", spec={})
+def test_df_to_sql_validates_columns_before_drop_in_replace_mode(mock_g) -> None:
+    """
+    Regression test: when ``if_exists='replace'`` is requested, an invalid
+    column name must be detected *before* the existing table is dropped, so
+    that a malformed upload cannot leave the database with no table at all.
+    """
+    from superset.db_engine_specs.hive import HiveEngineSpec
+
+    mock_g.user = True
+    mock_database = mock.MagicMock()
+    mock_execute = mock.MagicMock()
+    mock_database.get_sqla_engine.return_value.__enter__.return_value.execute = (
+        mock_execute
+    )
+
+    df = pd.DataFrame({"safe_col": [1], "evil`); DROP TABLE x; --": [2]})
+
+    with pytest.raises(SupersetException, match="Invalid Hive column name"):
+        HiveEngineSpec.df_to_sql(
+            mock_database,
+            Table(table="existing_table"),
+            df,
+            {"if_exists": "replace"},
+        )
+
+    # No SQL — destructive or otherwise — must have been issued.
+    mock_execute.assert_not_called()

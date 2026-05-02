@@ -268,15 +268,31 @@ class HiveEngineSpec(PrestoEngineSpec):
         if to_sql_kwargs["if_exists"] == "append":
             raise SupersetException("Append operation not currently supported")
 
-        # Validate the table identifier up-front so that any DDL we issue
-        # below cannot contain attacker-controlled SQL fragments. Hive does
-        # not support bind parameters for identifiers, so the only safe path
-        # is to allow-list each component of the qualified table reference
-        # before interpolating it into a SQL string.
+        # Validate every identifier we will interpolate into DDL up-front
+        # so that any failure (e.g. a malicious or malformed table, schema,
+        # or column name) is raised *before* we issue any destructive
+        # statements such as ``DROP TABLE``. Hive does not support bind
+        # parameters for identifiers, so the only safe path is to
+        # allow-list them.
         qualified_table = _quote_hive_table(table)
         validated_table_name = _validate_hive_identifier(table.table)
         validated_schema = (
             _validate_hive_identifier(table.schema) if table.schema else None
+        )
+
+        def _get_hive_type(dtype: np.dtype[Any]) -> str:
+            hive_type_by_dtype = {
+                np.dtype("bool"): "BOOLEAN",
+                np.dtype("float64"): "DOUBLE",
+                np.dtype("int64"): "BIGINT",
+                np.dtype("object"): "STRING",
+            }
+
+            return hive_type_by_dtype.get(dtype, "STRING")
+
+        schema_definition = ", ".join(
+            f"{_quote_hive_column(name)} {_get_hive_type(dtype)}"
+            for name, dtype in df.dtypes.items()
         )
 
         if to_sql_kwargs["if_exists"] == "fail":
@@ -299,21 +315,6 @@ class HiveEngineSpec(PrestoEngineSpec):
                 schema=table.schema,
             ) as engine:
                 engine.execute(f"DROP TABLE IF EXISTS {qualified_table}")
-
-        def _get_hive_type(dtype: np.dtype[Any]) -> str:
-            hive_type_by_dtype = {
-                np.dtype("bool"): "BOOLEAN",
-                np.dtype("float64"): "DOUBLE",
-                np.dtype("int64"): "BIGINT",
-                np.dtype("object"): "STRING",
-            }
-
-            return hive_type_by_dtype.get(dtype, "STRING")
-
-        schema_definition = ", ".join(
-            f"{_quote_hive_column(name)} {_get_hive_type(dtype)}"
-            for name, dtype in df.dtypes.items()
-        )
 
         with tempfile.NamedTemporaryFile(
             dir=app.config["UPLOAD_FOLDER"], suffix=".parquet"
