@@ -55,8 +55,8 @@ def _ensure_schema_exists(engine: Engine, schema: str) -> None:
     against SQL injection (CWE-89) when the schema name originates from a
     dataset configuration file or other potentially untrusted source.
 
-    SQLAlchemy 1.4's :class:`CreateSchema` does not yet support an
-    ``if_not_exists`` flag (added in SQLAlchemy 2.0), so the idempotent
+    SQLAlchemy 1.4's :class:`CreateSchema` does not support an
+    ``if_not_exists`` flag (introduced in SQLAlchemy 2.0), so the idempotent
     semantics of the original raw ``CREATE SCHEMA IF NOT EXISTS`` statement
     are preserved by catching the duplicate-schema error that the database
     raises when another process wins a TOCTOU race against the inspector
