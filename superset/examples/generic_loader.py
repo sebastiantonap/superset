@@ -17,11 +17,14 @@
 """Generic Parquet example data loader."""
 
 import logging
+import re
 from functools import partial
 from typing import Any, Callable, Optional
 
 import numpy as np
 from sqlalchemy import inspect
+from sqlalchemy.engine import Engine
+from sqlalchemy.schema import CreateSchema
 
 from superset import db
 from superset.connectors.sqla.models import SqlaTable
@@ -32,6 +35,37 @@ from superset.utils import json
 from superset.utils.database import get_example_database
 
 logger = logging.getLogger(__name__)
+
+# Strict allow-list for schema identifiers used in CREATE SCHEMA DDL.
+# Limits names to ASCII letters, digits, and underscores starting with a
+# letter or underscore. This is intentionally narrower than what most
+# databases technically permit so that schema names supplied via dataset
+# configuration files cannot be used to construct injected SQL.
+_VALID_SCHEMA_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _ensure_schema_exists(engine: Engine, schema: str) -> None:
+    """Create ``schema`` on ``engine`` if it does not already exist.
+
+    The schema name is validated against a strict allow-list and the DDL
+    statement is constructed via SQLAlchemy's :class:`CreateSchema` element
+    so that the identifier is quoted by the dialect's ``IdentifierPreparer``
+    rather than interpolated into a raw SQL string. Together these guard
+    against SQL injection (CWE-89) when the schema name originates from a
+    dataset configuration file or other potentially untrusted source.
+    """
+    if not isinstance(schema, str) or not _VALID_SCHEMA_NAME.match(schema):
+        raise ValueError(
+            f"Invalid schema name {schema!r}: schema names must match "
+            "[A-Za-z_][A-Za-z0-9_]* to be safely used in DDL."
+        )
+
+    inspector = inspect(engine)
+    if schema in inspector.get_schema_names():
+        return
+
+    with engine.begin() as conn:
+        conn.execute(CreateSchema(schema))
 
 
 def serialize_numpy_arrays(obj: Any) -> Any:  # noqa: C901
@@ -74,8 +108,6 @@ def load_parquet_table(  # noqa: C901
     Returns:
         The created SqlaTable object
     """
-    from sqlalchemy import text
-
     if database is None:
         database = get_example_database()
 
@@ -84,9 +116,7 @@ def load_parquet_table(  # noqa: C901
         if schema is None:
             schema = inspect(engine).default_schema_name
         else:
-            # Create schema if it doesn't exist (PostgreSQL)
-            with engine.begin() as conn:
-                conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+            _ensure_schema_exists(engine, schema)
 
     table_exists = database.has_table(Table(table_name, schema=schema))
     if table_exists and not force:
