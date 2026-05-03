@@ -487,6 +487,17 @@ def error_msg_from_exception(ex: Exception) -> str:
 
 
 def markdown(raw: str, markup_wrap: bool | None = False) -> str:
+    """Render a Markdown string to sanitised HTML.
+
+    The rendered HTML is passed through :func:`nh3.clean` with strict
+    allow-lists for tags and attributes, so any ``<script>`` tags, event
+    handlers (``onclick``/``onerror``/...), ``javascript:`` URLs, or other
+    elements not in the allow-lists below are stripped before the value is
+    returned. The result is therefore safe to render without further escaping.
+
+    When ``markup_wrap`` is true the sanitised string is wrapped in a
+    :class:`markupsafe.Markup` so Jinja templates render it as raw HTML.
+    """
     safe_markdown_tags = {
         "h1",
         "h2",
@@ -518,7 +529,7 @@ def markdown(raw: str, markup_wrap: bool | None = False) -> str:
         "img": {"src", "alt", "title"},
         "a": {"href", "alt", "title"},
     }
-    safe = md.markdown(
+    rendered = md.markdown(
         raw or "",
         extensions=[
             "markdown.extensions.tables",
@@ -526,11 +537,20 @@ def markdown(raw: str, markup_wrap: bool | None = False) -> str:
             "markdown.extensions.codehilite",
         ],
     )
-    # pylint: disable=no-member
-    safe = nh3.clean(safe, tags=safe_markdown_tags, attributes=safe_markdown_attrs)
+    # nh3.clean is a strict allow-list HTML sanitiser: anything not listed in
+    # safe_markdown_tags / safe_markdown_attrs above is stripped from the
+    # output, so the returned string contains no executable HTML.
+    sanitized = nh3.clean(  # pylint: disable=no-member
+        rendered,
+        tags=safe_markdown_tags,
+        attributes=safe_markdown_attrs,
+    )
     if markup_wrap:
-        safe = Markup(safe)
-    return safe
+        # `sanitized` has just been run through nh3.clean, so wrapping it in
+        # Markup() does not introduce XSS. The bandit/ruff rule cannot infer
+        # this, hence the explicit suppression.
+        return Markup(sanitized)  # noqa: S704  # nosec B704
+    return sanitized
 
 
 def sanitize_svg_content(svg_content: str) -> str:
