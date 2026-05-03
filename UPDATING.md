@@ -24,7 +24,7 @@ assists people when migrating to a new version.
 
 ## Next
 
-### Permalink URLs use `WEBDRIVER_BASEURL` instead of the request `Host` header
+### Permalink URLs use `WEBDRIVER_BASEURL_USER_FRIENDLY` instead of the request `Host` header
 
 The permalink REST endpoints under `/api/v1/explore/permalink`,
 `/api/v1/dashboard/<id>/permalink`, and `/api/v1/sqllab/permalink` previously
@@ -32,13 +32,15 @@ returned absolute URLs built with `flask.url_for(..., _external=True)`, which
 derives the host/scheme from the incoming request's `Host` header. An attacker
 who could send a request with a forged `Host` header could trick the API into
 returning a permalink URL pointing at an attacker-controlled domain (Host
-header injection — see issue #47).
+header injection, CWE-673 — see issues #43 / #47).
 
-These endpoints now build the absolute URL from the trusted `WEBDRIVER_BASEURL`
-configuration value (the same setting already used for thumbnails, alerts,
+These endpoints now build the absolute URL from the trusted
+`WEBDRIVER_BASEURL_USER_FRIENDLY` configuration value (which defaults to
+`WEBDRIVER_BASEURL`, the same setting already used for thumbnails, alerts,
 reports, and email links). Deployments that relied on the returned URL
 implicitly tracking the request host should set `WEBDRIVER_BASEURL` (and
-`WEBDRIVER_BASEURL_USER_FRIENDLY`) to the externally reachable Superset URL.
+optionally `WEBDRIVER_BASEURL_USER_FRIENDLY`) to the externally reachable
+Superset URL.
 
 ### OAuth2 redirect URI no longer derived from the request `Host` header
 

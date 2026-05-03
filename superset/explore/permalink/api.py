@@ -96,7 +96,9 @@ class ExplorePermalinkRestApi(BaseSupersetApi):
         try:
             state = self.add_model_schema.load(request.json)
             key = CreateExplorePermalinkCommand(state=state).run()
-            url = get_url_path("ExplorePermalinkView.permalink", key=key)
+            url = get_url_path(
+                "ExplorePermalinkView.permalink", user_friendly=True, key=key
+            )
             return self.response(201, key=key, url=url)
         except ValidationError as ex:
             return self.response(400, message=ex.messages)

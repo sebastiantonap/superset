@@ -84,11 +84,11 @@ def test_post(
 def test_post_ignores_host_header(
     form_data: dict[str, Any], permalink_salt: str, test_client, login_as_admin
 ):
-    """The returned permalink URL must be derived from WEBDRIVER_BASEURL,
-    not the attacker-controlled Host header (issue #47)."""
+    """The returned permalink URL must be derived from the configured base URL,
+    not from the (attacker-controllable) Host header (issues #43 / #47)."""
     from flask import current_app
 
-    base_url = current_app.config["WEBDRIVER_BASEURL"]
+    base_url = current_app.config["WEBDRIVER_BASEURL_USER_FRIENDLY"]
     resp = test_client.post(
         "api/v1/explore/permalink",
         json={"formData": form_data},

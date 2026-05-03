@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from flask import current_app
+from markupsafe import Markup
 from pandas.api.types import is_datetime64_dtype
 from pytest_mock import MockerFixture
 
@@ -39,6 +40,7 @@ from superset.utils.core import (
     get_stacktrace,
     get_user_agent,
     is_test,
+    markdown,
     merge_extra_filters,
     merge_extra_form_data,
     merge_request_params,
@@ -693,8 +695,9 @@ def test_get_user_agent(mocker: MockerFixture, app_context: None) -> None:
 
 @with_config(
     {
-        "USER_AGENT_FUNC": lambda database,
-        source: f"{database.database_name} {source.name}"
+        "USER_AGENT_FUNC": lambda database, source: (
+            f"{database.database_name} {source.name}"
+        )
     }
 )
 def test_get_user_agent_custom(mocker: MockerFixture, app_context: None) -> None:
@@ -1735,3 +1738,56 @@ def test_sanitize_url_blocks_dangerous():
     """Test that dangerous URL schemes are blocked."""
     assert sanitize_url("javascript:alert('xss')") == ""
     assert sanitize_url("data:text/html,<script>alert(1)</script>") == ""
+
+
+def test_markdown_renders_safe_html():
+    """Plain Markdown is rendered to the expected sanitised HTML."""
+    result = markdown("**hello**")
+    assert "<strong>hello</strong>" in result
+
+
+def test_markdown_strips_script_tags():
+    """A <script> payload is removed by nh3.clean before being returned."""
+    payload = "Hello <script>alert(1)</script> world"
+    result = markdown(payload)
+    assert "<script>" not in result
+    assert "alert(1)" not in result
+    assert "Hello" in result
+    assert "world" in result
+
+
+def test_markdown_strips_event_handlers():
+    """Inline event handlers such as onerror are stripped from the output."""
+    payload = '<img src="x" onerror="alert(1)" />'
+    result = markdown(payload)
+    assert "onerror" not in result.lower()
+    assert "alert(1)" not in result
+
+
+def test_markdown_strips_javascript_urls():
+    """Anchors using javascript: URLs have the dangerous href removed."""
+    payload = "[click](javascript:alert(1))"
+    result = markdown(payload)
+    assert "javascript:" not in result.lower()
+    assert "alert(1)" not in result
+
+
+def test_markdown_markup_wrap_returns_sanitised_markup():
+    """When markup_wrap=True the result is a Markup of sanitised HTML.
+
+    This is the path flagged by Bandit B704 / ruff S704 — verify that even
+    though the value is wrapped with markupsafe.Markup the output cannot
+    contain executable script content because nh3.clean has already run.
+    """
+    payload = "Hi<script>alert('xss')</script>"
+    result = markdown(payload, markup_wrap=True)
+    assert isinstance(result, Markup)
+    rendered = str(result)
+    assert "<script>" not in rendered
+    assert "alert('xss')" not in rendered
+    assert "Hi" in rendered
+
+
+def test_markdown_handles_none_input():
+    """A ``None`` input is treated as an empty string (no error)."""
+    assert markdown(None) == ""
