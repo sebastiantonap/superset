@@ -40,6 +40,29 @@ reports, and email links). Deployments that relied on the returned URL
 implicitly tracking the request host should set `WEBDRIVER_BASEURL` (and
 `WEBDRIVER_BASEURL_USER_FRIENDLY`) to the externally reachable Superset URL.
 
+### OAuth2 redirect URI no longer derived from the request `Host` header
+
+`superset.utils.oauth2.get_oauth2_redirect_uri()` previously called
+`flask.url_for("DatabaseRestApi.oauth2", _external=True)`, which builds the
+absolute URL from the incoming request's `Host` header. A request with a
+spoofed or attacker-controlled `Host` header could therefore influence the
+generated database OAuth2 redirect URI (CWE-673, see issue #64).
+
+The function now builds the URI from configuration instead, in the following
+order of preference:
+
+1. `DATABASE_OAUTH2_REDIRECT_URI` — explicit configured URI (unchanged).
+2. `SERVER_NAME` + `PREFERRED_URL_SCHEME` — Flask's standard absolute-URL
+   configuration.
+
+If neither is configured, `get_oauth2_redirect_uri()` raises an `OAuth2Error`
+with a message instructing operators to set `DATABASE_OAUTH2_REDIRECT_URI`.
+Deployments that relied on `Host`-header-derived redirect URIs (including
+local-dev installs that ran on the default config) must now set
+`DATABASE_OAUTH2_REDIRECT_URI` (or `SERVER_NAME` + `PREFERRED_URL_SCHEME`)
+to the public URL of the Superset instance — the same value already
+registered with the upstream OAuth2 provider.
+
 ### Granular Export Controls
 
 A new feature flag `GRANULAR_EXPORT_CONTROLS` introduces three fine-grained permissions that replace the legacy `can_csv` permission:
