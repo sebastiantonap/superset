@@ -20,8 +20,16 @@ from typing import Any, Optional
 
 from flask import Flask
 from flask_babel import lazy_gettext as _
-from sqlalchemy import text, TypeDecorator
-from sqlalchemy.engine import Connection, Dialect, Row
+from sqlalchemy import (
+    Column,
+    LargeBinary,
+    MetaData,
+    select,
+    Table,
+    TypeDecorator,
+    update,
+)
+from sqlalchemy.engine import Connection, CursorResult, Dialect, Row
 from sqlalchemy_utils import EncryptedType as SqlaEncryptedType
 
 
@@ -134,11 +142,42 @@ class SecretsMigrator:
             )
         )
 
-    @staticmethod
+    def _build_raw_table(
+        self, table_name: str, encrypted_column_names: list[str]
+    ) -> Table:
+        """
+        Build a stand-alone :class:`Table` mirroring ``table_name`` whose
+        encrypted columns use the underlying :class:`LargeBinary` storage
+        type rather than :class:`EncryptedType`.
+
+        The migrator deliberately handles encryption/decryption itself (using
+        both the previous and current ``SECRET_KEY``); going through the
+        column's :class:`EncryptedType` processors during I/O would either
+        decrypt unexpectedly on read or double-encrypt on write. This raw
+        view lets SQLAlchemy treat the values as opaque bytes while still
+        building parameterised SQL via the Core expression language, so
+        identifiers are quoted by the dialect (no f-string SQL).
+        """
+        src = self._db.metadata.tables[table_name]
+        return Table(
+            table_name,
+            MetaData(),
+            Column("id", src.c["id"].type, primary_key=True),
+            *[Column(name, LargeBinary) for name in encrypted_column_names],
+        )
+
     def _select_columns_from_table(
-        conn: Connection, column_names: list[str], table_name: str
-    ) -> Row:
-        return conn.execute(f"SELECT id, {','.join(column_names)} FROM {table_name}")  # noqa: S608
+        self, conn: Connection, column_names: list[str], table_name: str
+    ) -> CursorResult:
+        """
+        Select ``id`` and the requested columns from ``table_name`` using the
+        SQLAlchemy Core expression language. Resolving the table and columns
+        via :class:`MetaData` ensures identifiers are looked up from the
+        application's declarative models and quoted by the dialect, so the
+        statement cannot be hijacked by attacker-controlled identifiers.
+        """
+        raw_table = self._build_raw_table(table_name, column_names)
+        return conn.execute(select(raw_table))
 
     def _re_encrypt_row(
         self,
@@ -183,14 +222,12 @@ class SecretsMigrator:
                 self._dialect,
             )
 
-        set_cols = ",".join(
-            [f"{name} = :{name}" for name in list(re_encrypted_columns.keys())]
-        )
         logger.info("Processing table: %s", table_name)
+        raw_table = self._build_raw_table(table_name, list(re_encrypted_columns.keys()))
         conn.execute(
-            text(f"UPDATE {table_name} SET {set_cols} WHERE id = :id"),  # noqa: S608
-            id=row["id"],
-            **re_encrypted_columns,
+            update(raw_table)
+            .where(raw_table.c["id"] == row["id"])
+            .values(**re_encrypted_columns)
         )
 
     def run(self) -> None:
