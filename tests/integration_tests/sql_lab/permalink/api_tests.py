@@ -95,6 +95,34 @@ def test_post(
     db.session.commit()
 
 
+def test_post_ignores_forged_host_header(
+    tab_state_data: dict[str, Any], permalink_salt: str, test_client, login_as
+):
+    """
+    The returned permalink URL must be built from the configured
+    WEBDRIVER_BASEURL_USER_FRIENDLY rather than the request's Host header,
+    so an attacker cannot use Host header injection to produce a permalink
+    pointing at an attacker-controlled domain (issue #56).
+    """
+    login_as(GAMMA_SQLLAB_USERNAME)
+    forged_host = "evil.example.com"
+    resp = test_client.post(
+        "api/v1/sqllab/permalink",
+        json=tab_state_data,
+        headers={"Host": forged_host},
+    )
+    assert resp.status_code == 201
+    data = resp.json
+    key = data["key"]
+    url = data["url"]
+    assert forged_host not in url, (
+        f"Permalink URL must not reflect the forged Host header: {url}"
+    )
+    id_ = decode_permalink_id(key, permalink_salt)
+    db.session.query(KeyValueEntry).filter_by(id=id_).delete()
+    db.session.commit()
+
+
 def test_post_access_denied(tab_state_data: dict[str, Any], test_client, login_as):
     resp = test_client.post("api/v1/sqllab/permalink", json=tab_state_data)
     assert resp.status_code == 401
