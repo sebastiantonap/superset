@@ -16,6 +16,7 @@
 # under the License.
 import logging
 import os
+import re
 import time
 from collections.abc import Iterator
 from typing import Any, Callable, Optional, Union
@@ -30,12 +31,12 @@ from sqlalchemy import (
     select,
     String,
     Table,
-    text,
     update,
 )
 from sqlalchemy.dialects.mysql.base import MySQLDialect
 from sqlalchemy.dialects.postgresql.base import PGDialect
 from sqlalchemy.dialects.sqlite.base import SQLiteDialect  # noqa: E402
+from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.orm import Query, Session
@@ -52,6 +53,24 @@ LRED = "\033[91m"
 logger = logging.getLogger("alembic.env")
 
 DEFAULT_BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 1000))
+
+# Allow-list pattern for SQL identifiers (table/column names). Bind
+# parameters cannot be used for identifiers in DDL, so callers that need
+# to embed an identifier in a SQL string MUST validate it against this
+# pattern and quote it with the dialect's identifier preparer.
+_SAFE_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _safe_quoted_identifier(dialect: Dialect, name: str) -> str:
+    """
+    Validate ``name`` against an allow-list and return its dialect-quoted
+    form so it is safe to embed in a DDL statement.
+
+    :raises ValueError: if ``name`` is not a valid SQL identifier.
+    """
+    if not isinstance(name, str) or not _SAFE_SQL_IDENTIFIER_RE.match(name):
+        raise ValueError(f"Unsafe SQL identifier: {name!r}")
+    return dialect.identifier_preparer.quote(name)
 
 
 def get_table_column(
@@ -609,9 +628,10 @@ def cast_text_column_to_json(
     conn = op.get_bind()
 
     if isinstance(conn.dialect, PGDialect):
-        conn.execute(
-            text(
-                f"""
+        quoted_table = _safe_quoted_identifier(conn.dialect, table)
+        quoted_column = _safe_quoted_identifier(conn.dialect, column)
+        op.execute(
+            """
 CREATE OR REPLACE FUNCTION safe_to_jsonb(input text)
   RETURNS jsonb
   LANGUAGE plpgsql
@@ -623,12 +643,12 @@ EXCEPTION WHEN invalid_text_representation THEN
   RETURN NULL;
 END;
 $$;
-
-ALTER TABLE {table}
-ALTER COLUMN {column} TYPE jsonb
-USING safe_to_jsonb({column});
-                """
-            )
+            """
+        )
+        op.execute(
+            f"ALTER TABLE {quoted_table} "  # noqa: S608
+            f"ALTER COLUMN {quoted_column} TYPE jsonb "
+            f"USING safe_to_jsonb({quoted_column});"
         )
         return
 
@@ -684,14 +704,12 @@ def cast_json_column_to_text(
     conn = op.get_bind()
 
     if isinstance(conn.dialect, PGDialect):
-        conn.execute(
-            text(
-                f"""
-                ALTER TABLE {table}
-                ALTER COLUMN {column} TYPE text
-                USING {column}::text
-                """
-            )
+        quoted_table = _safe_quoted_identifier(conn.dialect, table)
+        quoted_column = _safe_quoted_identifier(conn.dialect, column)
+        op.execute(
+            f"ALTER TABLE {quoted_table} "  # noqa: S608
+            f"ALTER COLUMN {quoted_column} TYPE text "
+            f"USING {quoted_column}::text;"
         )
         return
 

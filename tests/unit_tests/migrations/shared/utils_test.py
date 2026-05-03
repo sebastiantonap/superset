@@ -15,7 +15,16 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from superset.migrations.shared.utils import create_index, drop_index
+import pytest
+from sqlalchemy.dialects import postgresql
+
+from superset.migrations.shared.utils import (
+    _safe_quoted_identifier,
+    cast_json_column_to_text,
+    cast_text_column_to_json,
+    create_index,
+    drop_index,
+)
 
 
 # ----- Dummy classes for capturing calls ----- #
@@ -202,3 +211,122 @@ def test_drop_index_drops_index_when_exists(monkeypatch):
     assert call_kwargs.get("index_name") == index_name
     # And a log message mentioning "Dropping index" should be generated.
     assert any("Dropping index" in msg for msg in dummy_logger.messages)
+
+
+# ----- Tests for SQL identifier validation ----- #
+class _DummyConn:
+    """Minimal stand-in for an Alembic/SQLAlchemy connection."""
+
+    def __init__(self, dialect):
+        self.dialect = dialect
+
+
+class _RecordingOp:
+    """Captures op.execute() calls so we can assert on the SQL emitted."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.executed = []
+
+    def get_bind(self):
+        return self._conn
+
+    def execute(self, statement):
+        self.executed.append(str(statement))
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["users", "_users", "u123", "User_Table"],
+)
+def test_safe_quoted_identifier_accepts_valid_names(name):
+    dialect = postgresql.dialect()
+    quoted = _safe_quoted_identifier(dialect, name)
+    # The dialect quoting may add double quotes, but the original name
+    # must always be embedded somewhere in the result.
+    assert name in quoted
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "1abc",
+        "users; DROP TABLE users",
+        "'; DROP TABLE users; --",
+        "users--",
+        "users.column",
+        "users column",
+        '"users"',
+        "",
+        None,
+    ],
+)
+def test_safe_quoted_identifier_rejects_unsafe_names(name):
+    dialect = postgresql.dialect()
+    with pytest.raises(ValueError, match="Unsafe SQL identifier"):
+        _safe_quoted_identifier(dialect, name)
+
+
+def test_cast_text_column_to_json_rejects_sqli_payload(monkeypatch):
+    """A SQL injection payload in the table or column name must be rejected
+    before any SQL is executed."""
+    conn = _DummyConn(postgresql.dialect())
+    op_recorder = _RecordingOp(conn)
+    monkeypatch.setattr("superset.migrations.shared.utils.op", op_recorder)
+
+    payload = "users; DROP TABLE users; --"
+    with pytest.raises(ValueError, match="Unsafe SQL identifier"):
+        cast_text_column_to_json(payload, "currency")
+    with pytest.raises(ValueError, match="Unsafe SQL identifier"):
+        cast_text_column_to_json("sql_metrics", payload)
+
+    # No SQL must have been executed against the connection.
+    assert op_recorder.executed == []
+
+
+def test_cast_json_column_to_text_rejects_sqli_payload(monkeypatch):
+    conn = _DummyConn(postgresql.dialect())
+    op_recorder = _RecordingOp(conn)
+    monkeypatch.setattr("superset.migrations.shared.utils.op", op_recorder)
+
+    payload = "'; DROP TABLE sql_metrics; --"
+    with pytest.raises(ValueError, match="Unsafe SQL identifier"):
+        cast_json_column_to_text(payload, "currency")
+    with pytest.raises(ValueError, match="Unsafe SQL identifier"):
+        cast_json_column_to_text("sql_metrics", payload)
+
+    assert op_recorder.executed == []
+
+
+def test_cast_text_column_to_json_emits_quoted_sql(monkeypatch):
+    """Valid identifiers must be quoted by the dialect identifier preparer
+    before being embedded in the DDL."""
+    conn = _DummyConn(postgresql.dialect())
+    op_recorder = _RecordingOp(conn)
+    monkeypatch.setattr("superset.migrations.shared.utils.op", op_recorder)
+
+    cast_text_column_to_json("sql_metrics", "currency")
+
+    # Two statements: the helper function, then the ALTER TABLE.
+    assert len(op_recorder.executed) == 2
+    function_sql, alter_sql = op_recorder.executed
+    assert "CREATE OR REPLACE FUNCTION safe_to_jsonb" in function_sql
+    assert "ALTER TABLE sql_metrics" in alter_sql
+    assert "ALTER COLUMN currency TYPE jsonb" in alter_sql
+    # No raw payload-style characters should be present.
+    assert "DROP TABLE" not in alter_sql
+    assert ";" in alter_sql  # statement terminator
+
+
+def test_cast_json_column_to_text_emits_quoted_sql(monkeypatch):
+    conn = _DummyConn(postgresql.dialect())
+    op_recorder = _RecordingOp(conn)
+    monkeypatch.setattr("superset.migrations.shared.utils.op", op_recorder)
+
+    cast_json_column_to_text("sql_metrics", "currency")
+
+    assert len(op_recorder.executed) == 1
+    alter_sql = op_recorder.executed[0]
+    assert "ALTER TABLE sql_metrics" in alter_sql
+    assert "ALTER COLUMN currency TYPE text" in alter_sql
+    assert "currency::text" in alter_sql
