@@ -37,7 +37,12 @@ from superset.tasks.utils import fetch_csrf_token, get_executor
 from superset.utils import json
 from superset.utils.date_parser import parse_human_datetime
 from superset.utils.machine_auth import MachineAuthProvider
-from superset.utils.urls import get_url_path, is_secure_url
+from superset.utils.urls import (
+    get_url_path,
+    is_secure_url,
+    SupersetUrlValidationError,
+    validate_url_for_ssrf,
+)
 
 logger = get_task_logger(__name__)
 logger.setLevel(logging.INFO)
@@ -244,6 +249,23 @@ def fetch_url(data: str, headers: dict[str, str]) -> dict[str, str]:
     result = {}
     try:
         url = get_url_path("ChartRestApi.warm_up_cache")
+
+        # Validate the URL before issuing any outbound request to mitigate SSRF
+        # (CWE-918). ``WEBDRIVER_BASEURL`` is configurable, so we reject
+        # non-public IP ranges (loopback, RFC1918, link-local — including the
+        # cloud-metadata endpoint 169.254.169.254) and disallowed schemes.
+        try:
+            validate_url_for_ssrf(
+                url,
+                allowed_hosts=(
+                    frozenset(current_app.config["WEBDRIVER_BASEURL_ALLOWED_HOSTS"])
+                    if current_app.config.get("WEBDRIVER_BASEURL_ALLOWED_HOSTS")
+                    else None
+                ),
+            )
+        except SupersetUrlValidationError as ex:
+            logger.error("Refusing to warm up cache: %s", ex)
+            return {"error": data, "exception": str(ex)}
 
         if is_secure_url(url):
             logger.info("URL '%s' is secure. Adding Referer header.", url)

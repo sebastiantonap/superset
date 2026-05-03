@@ -25,7 +25,7 @@ from urllib import request
 from uuid import UUID, uuid4
 
 from celery.utils.log import get_task_logger
-from flask import g
+from flask import current_app, g
 from superset_core.tasks.types import TaskProperties, TaskScope
 
 from superset.tasks.exceptions import ExecutorNotFoundError, InvalidExecutorError
@@ -37,7 +37,11 @@ from superset.tasks.types import (
 )
 from superset.utils import json
 from superset.utils.hashing import hash_from_str
-from superset.utils.urls import get_url_path
+from superset.utils.urls import (
+    get_url_path,
+    SupersetUrlValidationError,
+    validate_url_for_ssrf,
+)
 
 if TYPE_CHECKING:
     from superset.models.dashboard import Dashboard
@@ -127,6 +131,25 @@ def fetch_csrf_token(
     :returns: A map of headers, including the session cookie and csrf token
     """
     url = get_url_path("SecurityRestApi.csrf_token")
+
+    # Validate the URL before issuing any outbound request to mitigate SSRF
+    # (CWE-918). The base URL is read from ``WEBDRIVER_BASEURL`` configuration
+    # and a misconfigured (or attacker-influenced) value could otherwise be
+    # used to reach internal services such as the cloud-metadata endpoint
+    # ``169.254.169.254``.
+    try:
+        validate_url_for_ssrf(
+            url,
+            allowed_hosts=(
+                frozenset(current_app.config["WEBDRIVER_BASEURL_ALLOWED_HOSTS"])
+                if current_app.config.get("WEBDRIVER_BASEURL_ALLOWED_HOSTS")
+                else None
+            ),
+        )
+    except SupersetUrlValidationError:
+        logger.exception("Refusing to fetch CSRF token from disallowed URL")
+        return {}
+
     logger.info("Fetching %s", url)
     req = request.Request(url, headers=headers, method="GET")  # noqa: S310
     response: HTTPResponse
