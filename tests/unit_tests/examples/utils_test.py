@@ -20,6 +20,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 
 
@@ -204,3 +205,59 @@ def test_load_examples_from_configs_defaults(
         force_data=False,
     )
     mock_command.run.assert_called_once()
+
+
+@patch("superset.examples.utils.ImportExamplesCommand")
+def test_load_configs_from_directory_rejects_malicious_yaml_payload(
+    mock_command_cls,
+):
+    """A malicious metadata.yaml using a Python object tag must be rejected.
+
+    Regression test for the YAML deserialization vulnerability in
+    superset/examples/utils.py (issue #46). Prior to the fix, the metadata
+    file was parsed with ``yaml.load(..., Loader=yaml.Loader)`` which can
+    instantiate arbitrary Python objects from crafted YAML tags such as
+    ``!!python/object/apply:os.system``. With ``yaml.safe_load`` the parser
+    refuses to construct these tags and raises ``ConstructorError``.
+    """
+    from superset.commands.importers.v1.utils import METADATA_FILE_NAME
+    from superset.examples.utils import load_configs_from_directory
+
+    malicious_metadata = (
+        "version: '1.0.0'\n"
+        "type: !!python/object/apply:os.system ['echo pwned > /tmp/pwned']\n"
+    )
+
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / METADATA_FILE_NAME).write_text(malicious_metadata)
+
+        with pytest.raises(yaml.YAMLError):
+            load_configs_from_directory(root)
+
+    # The dangerous payload must never reach ImportExamplesCommand.
+    mock_command_cls.assert_not_called()
+
+
+@patch("superset.examples.utils.ImportExamplesCommand")
+def test_load_configs_from_directory_strips_type_from_safe_metadata(
+    mock_command_cls,
+):
+    """Benign metadata still has the ``type`` key stripped before import."""
+    from superset.commands.importers.v1.utils import METADATA_FILE_NAME
+    from superset.examples.utils import load_configs_from_directory
+
+    benign_metadata = "version: '1.0.0'\ntype: Database\n"
+    mock_command = MagicMock()
+    mock_command_cls.return_value = mock_command
+
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / METADATA_FILE_NAME).write_text(benign_metadata)
+
+        load_configs_from_directory(root)
+
+    contents_passed = mock_command_cls.call_args.args[0]
+    parsed = yaml.safe_load(contents_passed[METADATA_FILE_NAME])
+    assert "type" not in parsed
+    assert parsed.get("version") == "1.0.0"
