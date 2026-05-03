@@ -209,16 +209,38 @@ def test_get_sql_results_oauth2(mocker: MockerFixture, app) -> None:
     mocker.patch("superset.daos.key_value.KeyValueDAO.delete_expired_entries")
     mocker.patch("superset.daos.key_value.KeyValueDAO.create_entry")
     mocker.patch("superset.db_engine_specs.base.db.session.commit")
+    # The exact contract of ``get_oauth2_redirect_uri`` (configuration-driven
+    # URI building, no Host-header dependency) is exercised in
+    # ``tests/unit_tests/utils/oauth2_tests.py``. This test only cares that the
+    # value is forwarded into the OAuth2 redirect error, so the function is
+    # mocked directly rather than depending on which Flask app happens to be
+    # ``current_app`` at call time.
+    mocker.patch(
+        "superset.db_engine_specs.base.get_oauth2_redirect_uri",
+        return_value="http://localhost/api/v1/database/oauth2/",
+    )
 
     g = mocker.patch("superset.db_engine_specs.base.g")
     g.user = mocker.MagicMock()
     g.user.id = 42
 
+    # Provide ``redirect_uri`` explicitly in the OAuth2 client config so that
+    # ``OAuth2ClientConfigSchema``'s ``load_default=get_oauth2_redirect_uri``
+    # is not invoked. The schema captures the function reference at import
+    # time, so it cannot be overridden via ``mocker.patch`` on the module
+    # attribute.
+    oauth2_client_info_with_redirect = {
+        "oauth2_client_info": {
+            **oauth2_client_info["oauth2_client_info"],
+            "redirect_uri": "http://localhost/api/v1/database/oauth2/",
+        }
+    }
+
     database = Database(
         id=1,
         database_name="my_db",
         sqlalchemy_uri="sqlite://",
-        encrypted_extra=json.dumps(oauth2_client_info),
+        encrypted_extra=json.dumps(oauth2_client_info_with_redirect),
     )
     database.db_engine_spec.oauth2_exception = OAuth2Error  # type: ignore
     get_sqla_engine = mocker.patch.object(database, "get_sqla_engine")
@@ -239,6 +261,10 @@ def test_get_sql_results_oauth2(mocker: MockerFixture, app) -> None:
     assert error["error_type"] == SupersetErrorType.OAUTH2_REDIRECT
     assert error["level"] == ErrorLevel.WARNING
     assert error["extra"]["tab_id"] == "fb11f528-6eba-4a8a-837e-6b0d39ee9187"
+    # ``get_oauth2_redirect_uri`` is mocked above; the real implementation
+    # (which is independent of the request's ``Host`` header to prevent
+    # CWE-673 injection) is covered by tests in
+    # ``tests/unit_tests/utils/oauth2_tests.py``.
     assert error["extra"]["redirect_uri"] == "http://localhost/api/v1/database/oauth2/"
 
     # Parse the OAuth2 authorization URL and verify components individually,
