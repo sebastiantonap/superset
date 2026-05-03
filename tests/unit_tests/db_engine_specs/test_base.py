@@ -1251,13 +1251,23 @@ def test_start_oauth2_dance_uses_config_redirect_uri(mocker: MockerFixture) -> N
 )
 def test_start_oauth2_dance_falls_back_to_url_for(mocker: MockerFixture) -> None:
     """
-    Test that start_oauth2_dance falls back to url_for when no config is set.
-    """
-    fallback_uri = "http://localhost:8088/api/v1/database/oauth2/"
+    Test that start_oauth2_dance derives the redirect URI from the configured
+    ``SERVER_NAME`` + ``PREFERRED_URL_SCHEME`` when
+    ``DATABASE_OAUTH2_REDIRECT_URI`` is not set.
 
+    The unit-test app fixture sets ``SERVER_NAME = "example.com"`` and
+    ``PREFERRED_URL_SCHEME`` is left at its default (``"http"``), so the
+    expected redirect URI is built from those values rather than from the
+    request's ``Host`` header.
+    """
+    expected_redirect_uri = "http://example.com/api/v1/database/oauth2/"
+
+    # ``url_for`` is called without ``_external=True``; it returns the path
+    # portion only and ``get_oauth2_redirect_uri`` prepends the configured
+    # base URL.
     mocker.patch(
         "superset.utils.oauth2.url_for",
-        return_value=fallback_uri,
+        return_value="/api/v1/database/oauth2/",
     )
     mocker.patch("superset.daos.key_value.KeyValueDAO")
     mocker.patch("superset.db_engine_specs.base.db")
@@ -1282,4 +1292,4 @@ def test_start_oauth2_dance_falls_back_to_url_for(mocker: MockerFixture) -> None
 
     error = exc_info.value.error
 
-    assert error.extra["redirect_uri"] == fallback_uri
+    assert error.extra["redirect_uri"] == expected_redirect_uri

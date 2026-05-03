@@ -255,21 +255,38 @@ def get_oauth2_redirect_uri() -> str:
     """
     Return the OAuth2 redirect URI.
 
-    Tries the explicit config first, then falls back to url_for().
-    If url_for() fails (e.g. in headless/MCP contexts where the
-    DatabaseRestApi blueprint may not be registered), raises
-    OAuth2Error so callers don't silently proceed with an invalid URI.
+    To prevent Host-header injection (CWE-673) the absolute URI is built from
+    configured values rather than from the request's ``Host`` header. The
+    lookup order is:
+
+    1. ``DATABASE_OAUTH2_REDIRECT_URI`` — explicit configured URI.
+    2. ``SERVER_NAME`` + ``PREFERRED_URL_SCHEME`` — Flask's canonical
+       configuration for building absolute URLs.
+
+    If neither is configured, or if the underlying ``url_for`` call fails
+    (e.g. in headless/MCP contexts where the ``DatabaseRestApi`` blueprint
+    may not be registered), an :exc:`OAuth2Error` is raised so callers don't
+    silently proceed with an invalid URI.
     """
     if configured := app.config.get("DATABASE_OAUTH2_REDIRECT_URI"):
         return configured
 
     try:
-        return url_for("DatabaseRestApi.oauth2", _external=True)
+        path = url_for("DatabaseRestApi.oauth2")
     except (BuildError, RuntimeError):
         raise OAuth2Error(
             "Unable to determine the OAuth2 redirect URI. "
             "Set DATABASE_OAUTH2_REDIRECT_URI in the configuration."
         ) from None
+
+    if server_name := app.config.get("SERVER_NAME"):
+        scheme = app.config.get("PREFERRED_URL_SCHEME") or "https"
+        return f"{scheme}://{server_name}{path}"
+
+    raise OAuth2Error(
+        "Unable to determine the OAuth2 redirect URI. "
+        "Set DATABASE_OAUTH2_REDIRECT_URI in the configuration."
+    )
 
 
 class OAuth2ClientConfigSchema(Schema):
