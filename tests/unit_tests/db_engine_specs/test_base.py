@@ -1262,7 +1262,7 @@ def test_start_oauth2_dance_falls_back_to_url_for(mocker: MockerFixture) -> None
     """
     expected_redirect_uri = "http://example.com/api/v1/database/oauth2/"
 
-    # url_for is now called without ``_external=True``; it returns the path
+    # ``url_for`` is called without ``_external=True``; it returns the path
     # portion only and ``get_oauth2_redirect_uri`` prepends the configured
     # base URL.
     mocker.patch(
