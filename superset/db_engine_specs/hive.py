@@ -52,6 +52,70 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Allowlist for Hive catalog/schema/table identifiers. Hive DDL does not
+# support bind parameters for identifiers, so any identifier interpolated
+# into a DDL statement must first be validated against this allowlist to
+# prevent SQL injection (CWE-89). The pattern matches a SQL-style identifier
+# of ASCII letters, digits, and underscores starting with a letter or
+# underscore.
+_HIVE_IDENTIFIER_PATTERN = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+
+# Characters that must never appear in a Hive column name we interpolate into
+# DDL — they could break out of the surrounding backtick-quoted identifier or
+# inject control sequences. Anything else is allowed inside backticks.
+_HIVE_UNSAFE_COLUMN_CHARS = re.compile(r"[`;\x00-\x1f]")
+
+
+def _validate_hive_identifier(identifier: str | None) -> str:
+    """
+    Validate that ``identifier`` is safe to interpolate into a Hive DDL
+    statement.
+
+    Hive does not support binding parameters for identifiers, so any catalog,
+    schema, or table name that ends up in a DDL string must be allow-listed
+    first. Returns the identifier unchanged on success and raises a
+    :class:`SupersetException` otherwise.
+    """
+
+    if not isinstance(identifier, str) or not _HIVE_IDENTIFIER_PATTERN.match(
+        identifier
+    ):
+        raise SupersetException(
+            f"Invalid Hive identifier {identifier!r}: identifiers may only "
+            "contain ASCII letters, digits, and underscores, and must start "
+            "with a letter or underscore."
+        )
+    return identifier
+
+
+def _quote_hive_column(name: object) -> str:
+    """
+    Return a backtick-quoted Hive column identifier after rejecting any
+    characters that could be used to break out of the quoted identifier.
+    """
+
+    name_str = str(name)
+    if not name_str or _HIVE_UNSAFE_COLUMN_CHARS.search(name_str):
+        raise SupersetException(
+            f"Invalid Hive column name {name_str!r}: column names must not be "
+            "empty or contain backticks, semicolons, or control characters."
+        )
+    return f"`{name_str}`"
+
+
+def _quote_hive_table(table: Table) -> str:
+    """
+    Return a fully-qualified, backtick-quoted Hive table reference, after
+    validating each component as a safe identifier.
+    """
+
+    parts = [
+        _validate_hive_identifier(part)
+        for part in (table.catalog, table.schema, table.table)
+        if part
+    ]
+    return ".".join(f"`{p}`" for p in parts)
+
 
 def upload_to_s3(filename: str, upload_prefix: str, table: Table) -> str:
     """
@@ -204,26 +268,17 @@ class HiveEngineSpec(PrestoEngineSpec):
         if to_sql_kwargs["if_exists"] == "append":
             raise SupersetException("Append operation not currently supported")
 
-        if to_sql_kwargs["if_exists"] == "fail":
-            # Ensure table doesn't already exist.
-            if table.schema:
-                table_exists = not database.get_df(
-                    f"SHOW TABLES IN {table.schema} LIKE '{table.table}'"
-                ).empty
-            else:
-                table_exists = not database.get_df(
-                    f"SHOW TABLES LIKE '{table.table}'"
-                ).empty
-
-            if table_exists:
-                raise SupersetException("Table already exists")
-        elif to_sql_kwargs["if_exists"] == "replace":
-            with cls.get_engine(
-                database,
-                catalog=table.catalog,
-                schema=table.schema,
-            ) as engine:
-                engine.execute(f"DROP TABLE IF EXISTS {str(table)}")
+        # Validate every identifier we will interpolate into DDL up-front
+        # so that any failure (e.g. a malicious or malformed table, schema,
+        # or column name) is raised *before* we issue any destructive
+        # statements such as ``DROP TABLE``. Hive does not support bind
+        # parameters for identifiers, so the only safe path is to
+        # allow-list them.
+        qualified_table = _quote_hive_table(table)
+        validated_table_name = _validate_hive_identifier(table.table)
+        validated_schema = (
+            _validate_hive_identifier(table.schema) if table.schema else None
+        )
 
         def _get_hive_type(dtype: np.dtype[Any]) -> str:
             hive_type_by_dtype = {
@@ -236,8 +291,30 @@ class HiveEngineSpec(PrestoEngineSpec):
             return hive_type_by_dtype.get(dtype, "STRING")
 
         schema_definition = ", ".join(
-            f"`{name}` {_get_hive_type(dtype)}" for name, dtype in df.dtypes.items()
+            f"{_quote_hive_column(name)} {_get_hive_type(dtype)}"
+            for name, dtype in df.dtypes.items()
         )
+
+        if to_sql_kwargs["if_exists"] == "fail":
+            # Ensure table doesn't already exist.
+            if validated_schema:
+                table_exists = not database.get_df(
+                    f"SHOW TABLES IN `{validated_schema}` LIKE '{validated_table_name}'"
+                ).empty
+            else:
+                table_exists = not database.get_df(
+                    f"SHOW TABLES LIKE '{validated_table_name}'"
+                ).empty
+
+            if table_exists:
+                raise SupersetException("Table already exists")
+        elif to_sql_kwargs["if_exists"] == "replace":
+            with cls.get_engine(
+                database,
+                catalog=table.catalog,
+                schema=table.schema,
+            ) as engine:
+                engine.execute(f"DROP TABLE IF EXISTS {qualified_table}")
 
         with tempfile.NamedTemporaryFile(
             dir=app.config["UPLOAD_FOLDER"], suffix=".parquet"
@@ -249,14 +326,16 @@ class HiveEngineSpec(PrestoEngineSpec):
                 catalog=table.catalog,
                 schema=table.schema,
             ) as engine:
+                # The table reference and column definitions are validated
+                # via ``_quote_hive_table`` / ``_quote_hive_column`` above, so
+                # interpolating them here is safe. The only user-controlled
+                # value is the S3 location, which is bound as a parameter.
+                create_table_ddl = (
+                    f"CREATE TABLE {qualified_table} ({schema_definition}) "
+                    "STORED AS PARQUET LOCATION :location"
+                )
                 engine.execute(
-                    text(
-                        f"""
-                        CREATE TABLE {str(table)} ({schema_definition})
-                        STORED AS PARQUET
-                        LOCATION :location
-                        """
-                    ),
+                    text(create_table_ddl),
                     location=upload_to_s3(
                         filename=file.name,
                         upload_prefix=app.config["CSV_TO_HIVE_UPLOAD_DIRECTORY_FUNC"](
