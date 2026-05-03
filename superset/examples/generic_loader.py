@@ -17,11 +17,15 @@
 """Generic Parquet example data loader."""
 
 import logging
+import re
 from functools import partial
 from typing import Any, Callable, Optional
 
 import numpy as np
 from sqlalchemy import inspect
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.schema import CreateSchema
 
 from superset import db
 from superset.connectors.sqla.models import SqlaTable
@@ -32,6 +36,52 @@ from superset.utils import json
 from superset.utils.database import get_example_database
 
 logger = logging.getLogger(__name__)
+
+# Strict allow-list for schema identifiers used in CREATE SCHEMA DDL.
+# Limits names to ASCII letters, digits, and underscores starting with a
+# letter or underscore. This is intentionally narrower than what most
+# databases technically permit so that schema names supplied via dataset
+# configuration files cannot be used to construct injected SQL.
+_VALID_SCHEMA_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _ensure_schema_exists(engine: Engine, schema: str) -> None:
+    """Create ``schema`` on ``engine`` if it does not already exist.
+
+    The schema name is validated against a strict allow-list and the DDL
+    statement is constructed via SQLAlchemy's :class:`CreateSchema` element
+    so that the identifier is quoted by the dialect's ``IdentifierPreparer``
+    rather than interpolated into a raw SQL string. Together these guard
+    against SQL injection (CWE-89) when the schema name originates from a
+    dataset configuration file or other potentially untrusted source.
+
+    SQLAlchemy 1.4's :class:`CreateSchema` does not support an
+    ``if_not_exists`` flag (introduced in SQLAlchemy 2.0), so the idempotent
+    semantics of the original raw ``CREATE SCHEMA IF NOT EXISTS`` statement
+    are preserved by catching the duplicate-schema error that the database
+    raises when another process wins a TOCTOU race against the inspector
+    pre-check.
+    """
+    if not isinstance(schema, str) or not _VALID_SCHEMA_NAME.match(schema):
+        raise ValueError(
+            f"Invalid schema name {schema!r}: schema names must match "
+            "[A-Za-z_][A-Za-z0-9_]* to be safely used in DDL."
+        )
+
+    if schema in inspect(engine).get_schema_names():
+        return
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(CreateSchema(schema))
+    except DBAPIError:
+        # Another process created the schema between the inspector check
+        # and the CREATE SCHEMA execution. Re-verify via a fresh inspector;
+        # if the schema is now present the DDL effectively succeeded and we
+        # can swallow the duplicate-schema error. Otherwise re-raise so the
+        # caller still sees genuine database failures.
+        if schema not in inspect(engine).get_schema_names():
+            raise
 
 
 def serialize_numpy_arrays(obj: Any) -> Any:  # noqa: C901
@@ -74,8 +124,6 @@ def load_parquet_table(  # noqa: C901
     Returns:
         The created SqlaTable object
     """
-    from sqlalchemy import text
-
     if database is None:
         database = get_example_database()
 
@@ -84,9 +132,7 @@ def load_parquet_table(  # noqa: C901
         if schema is None:
             schema = inspect(engine).default_schema_name
         else:
-            # Create schema if it doesn't exist (PostgreSQL)
-            with engine.begin() as conn:
-                conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+            _ensure_schema_exists(engine, schema)
 
     table_exists = database.has_table(Table(table_name, schema=schema))
     if table_exists and not force:
@@ -187,6 +233,7 @@ def load_parquet_table(  # noqa: C901
         tbl.fetch_metadata()
 
     db.session.merge(tbl)
+    # pylint: disable=consider-using-transaction
     db.session.commit()
 
     return tbl
@@ -242,6 +289,7 @@ def create_generic_loader(
         if description and tbl:
             tbl.description = description
             db.session.merge(tbl)
+            # pylint: disable=consider-using-transaction
             db.session.commit()
 
     # Set function name and docstring

@@ -18,6 +18,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 @patch("superset.examples.generic_loader.get_example_database")
 @patch("superset.examples.generic_loader.db")
@@ -231,3 +233,208 @@ def test_create_generic_loader_without_uuid():
         mock_load.assert_called_once()
         call_kwargs = mock_load.call_args[1]
         assert call_kwargs["uuid"] is None
+
+
+# ---------------------------------------------------------------------------
+# Schema-name SQL-injection regression tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        '"; DROP TABLE users; --',
+        '" OR 1=1 --',
+        'evil"; DROP TABLE foo; --',
+        "schema with space",
+        "schema-with-dash",
+        "1leading_digit",
+        "",
+        "schema;",
+        "public;DROP",
+        '"',
+        "schema/comment",
+    ],
+)
+def test_ensure_schema_exists_rejects_injection_payloads(schema):
+    """Malicious / malformed schema names must be rejected before any SQL runs."""
+    from superset.examples.generic_loader import _ensure_schema_exists
+
+    engine = MagicMock()
+
+    with pytest.raises(ValueError, match="Invalid schema name"):
+        _ensure_schema_exists(engine, schema)
+
+    # No DDL should ever be issued for a rejected schema name.
+    engine.begin.assert_not_called()
+
+
+@pytest.mark.parametrize("schema", [None, 123, ["public"], {"name": "public"}])
+def test_ensure_schema_exists_rejects_non_string_input(schema):
+    """Non-string schema arguments must raise rather than be coerced into SQL."""
+    from superset.examples.generic_loader import _ensure_schema_exists
+
+    engine = MagicMock()
+
+    with pytest.raises(ValueError, match="Invalid schema name"):
+        _ensure_schema_exists(engine, schema)
+
+    engine.begin.assert_not_called()
+
+
+def test_ensure_schema_exists_skips_create_when_schema_exists():
+    """If the schema already exists, no CREATE SCHEMA DDL should be executed."""
+    from superset.examples.generic_loader import _ensure_schema_exists
+
+    engine = MagicMock()
+    inspector = MagicMock()
+    inspector.get_schema_names.return_value = ["public", "analytics"]
+
+    with patch("superset.examples.generic_loader.inspect", return_value=inspector):
+        _ensure_schema_exists(engine, "analytics")
+
+    engine.begin.assert_not_called()
+
+
+def test_ensure_schema_exists_uses_create_schema_ddl():
+    """When the schema is absent, CreateSchema DDL is used instead of raw text()."""
+    from superset.examples.generic_loader import _ensure_schema_exists
+
+    engine = MagicMock()
+    inspector = MagicMock()
+    inspector.get_schema_names.return_value = ["public"]
+
+    conn = MagicMock()
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch("superset.examples.generic_loader.inspect", return_value=inspector):
+        _ensure_schema_exists(engine, "analytics_new")
+
+    # Exactly one DDL execution, dispatched via SQLAlchemy's CreateSchema element.
+    conn.execute.assert_called_once()
+    (executed,), _ = conn.execute.call_args
+    from sqlalchemy.schema import CreateSchema
+
+    assert isinstance(executed, CreateSchema)
+    # The element must carry the validated, untouched identifier.
+    assert executed.element == "analytics_new"
+
+
+def test_ensure_schema_exists_swallows_concurrent_create_race():
+    """If another process created the schema in the meantime, swallow the error.
+
+    Replicates a TOCTOU race: the inspector reports the schema as missing,
+    so we attempt CREATE SCHEMA, the database raises a duplicate-schema
+    error (because another process won the race), and a fresh inspector
+    confirms the schema now exists. The helper must treat this as success
+    and not propagate the error — preserving the IF NOT EXISTS semantics
+    of the original raw DDL.
+    """
+    from sqlalchemy.exc import ProgrammingError
+
+    from superset.examples.generic_loader import _ensure_schema_exists
+
+    engine = MagicMock()
+    conn = MagicMock()
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+    conn.execute.side_effect = ProgrammingError(
+        "CREATE SCHEMA analytics", {}, Exception('schema "analytics" already exists')
+    )
+
+    inspector_before = MagicMock()
+    inspector_before.get_schema_names.return_value = ["public"]
+    inspector_after = MagicMock()
+    inspector_after.get_schema_names.return_value = ["public", "analytics"]
+
+    with patch(
+        "superset.examples.generic_loader.inspect",
+        side_effect=[inspector_before, inspector_after],
+    ):
+        _ensure_schema_exists(engine, "analytics")  # must NOT raise
+
+    conn.execute.assert_called_once()
+
+
+def test_ensure_schema_exists_reraises_real_db_errors():
+    """Genuine database errors (not duplicate-schema races) must propagate."""
+    from sqlalchemy.exc import ProgrammingError
+
+    from superset.examples.generic_loader import _ensure_schema_exists
+
+    engine = MagicMock()
+    conn = MagicMock()
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+    conn.execute.side_effect = ProgrammingError(
+        "CREATE SCHEMA analytics", {}, Exception("permission denied for database")
+    )
+
+    inspector_before = MagicMock()
+    inspector_before.get_schema_names.return_value = ["public"]
+    # Even after the error the schema is still absent -> not a race.
+    inspector_after = MagicMock()
+    inspector_after.get_schema_names.return_value = ["public"]
+
+    with patch(
+        "superset.examples.generic_loader.inspect",
+        side_effect=[inspector_before, inspector_after],
+    ):
+        with pytest.raises(ProgrammingError):
+            _ensure_schema_exists(engine, "analytics")
+
+
+def test_ensure_schema_exists_create_schema_quotes_malicious_identifier_safely():
+    """SQLAlchemy's CreateSchema must double-quote embedded quote characters.
+
+    The schema identifier itself is validated against an allow-list, but this
+    test additionally pins the underlying SQLAlchemy behaviour we rely on:
+    even if the allow-list ever changed, ``CreateSchema`` would still emit
+    safely quoted DDL rather than allowing identifier-level injection.
+    """
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateSchema
+
+    payload = 'evil"; DROP TABLE users; --'
+    compiled = str(CreateSchema(payload).compile(dialect=postgresql.dialect()))
+    # Embedded double-quote is doubled, so the entire payload stays inside a
+    # single quoted identifier instead of breaking out into a new statement.
+    assert compiled == 'CREATE SCHEMA "evil""; DROP TABLE users; --"'
+    # Balanced quoting is what guarantees the closing quote isn't escaped
+    # away — an odd number would mean the identifier "leaks" into raw SQL.
+    assert compiled.count('"') % 2 == 0
+    # The compiled DDL must be a single ``CREATE SCHEMA "..."`` statement;
+    # any ``;`` characters in the payload remain inside the quoted identifier.
+    assert compiled.startswith('CREATE SCHEMA "')
+    assert compiled.endswith('"')
+
+
+@patch("superset.examples.generic_loader.get_example_database")
+@patch("superset.examples.generic_loader.db")
+def test_load_parquet_table_rejects_injected_schema(mock_db, mock_get_db):
+    """End-to-end: a SQL-injection schema payload aborts the loader safely."""
+    from superset.examples.generic_loader import load_parquet_table
+
+    mock_database = MagicMock()
+    mock_database.id = 1
+    mock_get_db.return_value = mock_database
+
+    mock_engine = MagicMock()
+    mock_database.get_sqla_engine.return_value.__enter__ = MagicMock(
+        return_value=mock_engine
+    )
+    mock_database.get_sqla_engine.return_value.__exit__ = MagicMock(return_value=False)
+
+    with pytest.raises(ValueError, match="Invalid schema name"):
+        load_parquet_table(
+            parquet_file="test_data",
+            table_name="test_table",
+            database=mock_database,
+            only_metadata=True,
+            schema='"; DROP TABLE users; --',
+        )
+
+    # No DDL or table-existence check should have been attempted.
+    mock_engine.begin.assert_not_called()
+    mock_database.has_table.assert_not_called()
